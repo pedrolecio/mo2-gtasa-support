@@ -1,113 +1,75 @@
 # GTA San Andreas Support Plugin for Mod Organizer 2
 
-Plugin completo para o **Mod Organizer 2** que adiciona suporte ao **GTA San Andreas (versão clássica – Steam/Retail)**.
+A comprehensive Mod Organizer 2 plugin designed for **Grand Theft Auto: San Andreas (Classic/Steam/Retail/Downgraded)**. 
 
-## Funcionalidades
+Because Mod Organizer 2's native Virtual File System (VFS) has compatibility issues with the GTA:SA classic engine (specifically the common v1.0 Hoodlum executable, where VFS causes a startup crash), this plugin bypasses those limitations to provide a robust, non-destructive, and conflict-resolving modding experience.
 
-| Feature | Descrição |
-|---|---|
-| **VFS File-Level** | Mapeamento de arquivos individuais (não pastas inteiras), garantindo que mods de vários autores coexistam sem conflito em subpastas como `cleo/` e `modloader/` |
-| **Instalação inteligente** | Detecta automaticamente o tipo do mod durante a instalação e organiza os arquivos corretamente |
-| **CLEO Support** | Scripts `.cs`, `.csa`, `.csi`, `.fxt` são roteados para `cleo/` |
-| **Modloader Support** | Mods com assets (`models/`, `audio/`, etc.) são embrulhados em `modloader/<nome>/` |
-| **Root Mods** | Arquivos `.asi`, `.dll`, etc. são instalados na raíz do jogo |
-| **Priority Sync** | Antes de cada execução, as prioridades do `modloader.ini` são sincronizadas com a ordem de carga do MO2 |
-| **Overwrite Writable** | Logs, saves e configs criados pelo jogo/mods são redirecionados para a pasta Overwrite do MO2 |
+## ✨ Core Features
+
+* **Physical Root Linking:** Automatically safely copies mod files into your game directory before launch and cleans them up after, keeping your base game pure while avoiding engine crashes.
+* **Smart Mod Installation:** Recognizes mod file types and automatically organizes them into `cleo/`, `modloader/`, or the game's root folder without manual intervention.
+* **Modloader Priority Synchronization:** MO2's mod hierarchy conflict resolution rules seamlessly apply to Modloader, syncing your MO2 load order with `modloader.ini` on every launch.
+* **Automatic Backups:** Real game files that happen to be overwritten by root mods are safely backed up and restored once the mod is disabled.
 
 ---
 
-## Instalação
+## 🚀 How It Works (Technical Overview)
 
-1. Copie a pasta `gtasa_support/` para a pasta `plugins/` da sua instalação do MO2:
+This plugin handles GTA: SA modding via four primary systems:
+
+### 1. Game Detection
+The plugin detects installations of `gta_sa.exe` and `gta-sa.exe`. It identifies the Hoodlum crack via specific file sizes or `.nfo` files to ensure accurate behavior. To resolve MO2 startup crashes with the v1.0 game, it masks the game's actual data directory using a dummy path (`GTA Root Folder`) while handling files manually.
+
+### 2. Smart Installer (`installer.py`)
+Replaces MO2's default installer to automatically map out mod payloads. When you install an archive, the plugin reorganizes it based on the contents:
+- **CLEO Scripts:** Any `.cs`, `.csa`, `.csi`, or `.fxt` files at the root of the archive are moved inside a `cleo/` folder.
+- **Modloader Assets:** If the archive contains standard game asset folders (like `models/`, `audio/`, `data/`, `txd/`), the contents are automatically wrapped in a `modloader/<ModName>/` directory.
+- **Root Plugins:** ASI plugins (`.asi`), DLLs, and INIs are recognized as root files and are kept at the root of the mod.
+- **Pre-structured Mods:** If the mod already comes with `cleo/`, `modloader/`, or `moonloader/` folders, the installer respects the author's structure.
+- **Fallback:** If it encounters loose ambiguous files (like a random `.dff`), it defaults to a manual installation prompt.
+
+### 3. Modloader Priority Sync (`modloader_ini.py`)
+To ensure MO2's "Load Order" is respected by the game, the plugin intercepts the launch process and dynamically edits your `modloader.ini`.
+- It scans all active MO2 mods that inject into the `modloader/` folder.
+- It translates their MO2 precedence (from 1 to N, where higher overwrites lower) directly into the `[Profiles.Default.Priority]` section of the `.ini`.
+- This ensures that a texture mod placed lower in MO2 will override an opposing texture mod placed higher in the list, completely mirroring MO2's standard conflict rules.
+
+### 4. Physical Root Linker (`root_linker.py`)
+Since standard VFS hooking crashes the game engine, the plugin operates via a "RootBuilder" approach.
+- **On Game Launch:** The plugin gathers all active mods in their designated priority order. It then physically copies these files from your MO2 `mods/` directory straight into the actual GTA San Andreas game directory.
+- **Backups:** If a mod file conflicts with a vanilla game file, the vanilla file is safely moved into a `.mo2_root_backups` folder.
+- **Tracking:** Every injected file is tracked in a local `.mo2_root_mod_files.json` registry.
+- **On Change/Cleanup:** If you disable a mod, remove a file, or change your load order, the linker will read the tracker, delete the old mod files, clean up any left-over empty directories, and restore any original game backups automatically before launching again.
+
+---
+
+## 📦 File Structure
+
+```text
+gtasa_support/
+  ├── __init__.py          # Plugin Entrypoint
+  ├── plugin.py            # IPluginGame (Detection and execution hooks)
+  ├── installer.py         # IPluginInstallerSimple (Smart Mod Archiving)
+  ├── modloader_ini.py     # Mod priority synchronization logic
+  ├── root_linker.py       # Pre-launch physical copy and cleanup script
+  └── README.md            # Documentation
+```
+
+---
+
+## 🛠️ Installation & Requirements
+
+### Requirements
+- **Mod Organizer 2** (v2.4 or higher, with Python support enabled)
+- **GTA San Andreas** (Steam AppID 12120, Retail, or v1.0 Downgraded)
+- **Modloader** installed in your game directory (Highly recommended for assets)
+- **CLEO** installed in your game directory (Optional, if you plan to use CLEO scripts)
+
+### Installation
+1. Extract the `gtasa_support` folder into your Mod Organizer 2 plugins directory:
    ```
    Mod Organizer 2\plugins\gtasa_support\
    ```
-
-2. Inicie o MO2. O jogo **GTA: San Andreas** aparecerá na lista de jogos.
-
-3. Aponte para o diretório onde `gta_sa.exe` está instalado se o MO2 não detectar automaticamente.
-
----
-
-## Como o VFS Funciona
-
-```
-[MO2 Mods]            [VFS]               [Jogo]
-Mod A/cleo/a.cs  ──►  cleo/a.cs  ──►  GTA SA/cleo/a.cs
-Mod B/cleo/b.cs  ──►  cleo/b.cs  ──►  GTA SA/cleo/b.cs   } Ambos visíveis!
-Mod C/models/... ──►  modloader/... ──► GTA SA/modloader/...
-Overwrite/       ──►  GTA SA/     (with createTarget=True = escrita permitida)
-```
-
-O mapeamento é **file-level**: o MO2 faz merge de todos os arquivos de todos os mods em cada subpasta, em vez de sobrescrever pastas inteiras. Isso garante que o CLEO veja todos os scripts `.cs` de todos os mods simultaneamente.
-
----
-
-## Tipos de Mod e Estruturas Esperadas
-
-### Mod CLEO (scripts)
-```
-MeuMod/
-  myscript.cs        ← detectado pelo instalador → movido para cleo/
-```
-Resultado no MO2:
-```
-MeuMod/
-  cleo/
-    myscript.cs
-```
-
-### Mod de Raíz (ASI plugins, etc.)
-```
-MeuMod/
-  myplugin.asi       ← detectado → fica na raíz
-```
-
-### Mod Modloader (assets)
-```
-MeuMod/
-  models/
-    veículo.dff      ← detectado → embrulhado em modloader/MeuMod/
-```
-Resultado:
-```
-MeuMod/
-  modloader/
-    MeuMod/
-      models/
-        veículo.dff
-```
-
-### Mod já estruturado
-Se já contém `cleo/`, `modloader/`, `scripts/` → mantém como está.
-
----
-
-## Sincronização de Prioridades (modloader.ini)
-
-Antes de cada execução:
-- MO2 prioridade `N` → `modloader.ini` Priority `= 50 + N`
-- Mods de maior prioridade no MO2 recebem números maiores → carregam por último → sobrescrevem os anteriores
-- Comportamento idêntico ao sistema de conflitos do MO2
-
----
-
-## Estrutura dos Arquivos
-
-```
-gtasa_support/
-  __init__.py       ← Entrypoint (createPlugins)
-  plugin.py         ← IPluginGame + IPluginFileMapper
-  installer.py      ← IPluginInstallerSimple
-  modloader_ini.py  ← Sincronização de prioridades
-  README.md         ← Este arquivo
-```
-
----
-
-## Requisitos
-
-- Mod Organizer 2 ≥ 2.4 (com suporte a plugins Python e PyQt6)
-- GTA San Andreas (Steam AppID 12120 ou instalação manual)
-- Modloader (recomendado para mods de assets)
-- CLEO (opcional, para scripts `.cs`)
+2. Open Mod Organizer 2. 
+3. Create a new instance and select **GTA: San Andreas**.
+4. If MO2 does not auto-detect the game path, point it manually to the folder containing `gta_sa.exe` or `gta-sa.exe`.
