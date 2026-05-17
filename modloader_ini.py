@@ -30,6 +30,9 @@ def _write_priorities_impl(game_dir: str, organizer) -> None:
     mod_list = organizer.modList()
     all_mods = mod_list.allModsByProfilePriority()
 
+    # Define dinamicamente o priority limit, sendo pelo menos 9999
+    priority_limit = max(9999, len(all_mods) + 10)
+
     # Coleta os mods ativos com suas pastas no modloader
     entries_dict: dict[str, int] = {}
 
@@ -73,6 +76,10 @@ def _write_priorities_impl(game_dir: str, organizer) -> None:
     pattern = re.compile(
         r"(\[Profiles\.Default\.Priority\])(.*?)(\n\[|\Z)", re.DOTALL
     )
+    # Regex para a seção Folder.Config
+    folder_pattern = re.compile(
+        r"(\[Folder\.Config\])(.*?)(\n\[|\Z)", re.DOTALL
+    )
 
     for ini_path in targets:
         ini_path.parent.mkdir(parents=True, exist_ok=True)
@@ -87,11 +94,29 @@ def _write_priorities_impl(game_dir: str, organizer) -> None:
                 except UnicodeDecodeError:
                     continue
 
-        # Garante que a seção existe
+        # Garante que a seção [Folder.Config] existe e injeta PriorityLimit
+        if "[Folder.Config]" not in content:
+            content = f"[Folder.Config]\nPriorityLimit = {priority_limit}\n\n" + content.lstrip()
+
+        def _replace_folder_config(m: re.Match) -> str:
+            header = m.group(1)
+            body_text = m.group(2)
+            tail = m.group(3)
+            # Remove qualquer prioritylimit já existente
+            body_lines = [l for l in body_text.splitlines() if not l.strip().lower().startswith("prioritylimit")]
+            new_body = "\n".join(body_lines).strip()
+            res = f"{header}\nPriorityLimit = {priority_limit}"
+            if new_body:
+                res += f"\n{new_body}"
+            return res + tail
+
+        content = folder_pattern.sub(_replace_folder_config, content)
+
+        # Garante que a seção de prioridades existe
         if section not in content:
             content = content.rstrip() + f"\n\n{section}\n"
 
-        def _replace(m: re.Match) -> str:
+        def _replace_priority(m: re.Match) -> str:
             header = m.group(1)
             body   = m.group(2)
             tail   = m.group(3)
@@ -99,7 +124,7 @@ def _write_priorities_impl(game_dir: str, organizer) -> None:
             comments = [l for l in body.splitlines() if l.strip().startswith(";")]
             return header + "\n" + "\n".join(comments + priority_lines) + "\n" + tail
 
-        new_content = pattern.sub(_replace, content)
+        new_content = pattern.sub(_replace_priority, content)
 
         # Escrita atômica via arquivo temporário
         tmp_path = ini_path.with_suffix(".tmp")
