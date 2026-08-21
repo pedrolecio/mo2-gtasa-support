@@ -1,19 +1,20 @@
 # GTA San Andreas Support for Mod Organizer 2
 
-This plugin adds support for the classic PC release of Grand Theft Auto: San
-Andreas to Mod Organizer 2.
+This plugin adds Mod Organizer 2 support for GTA San Andreas 1.0 US.
 
-GTA San Andreas 1.0, particularly the commonly used Hoodlum executable, does not
-always work reliably with USVFS injection. This plugin uses MO2 to manage the mod
-list and resolve conflicts, then copies the winning files into the game directory
-before launch. The game itself is started without USVFS.
+The supported setup uses the 1.0 US Hoodlum executable. Steam and other digital
+store versions are not supported as installed: replace the store executable with
+the Hoodlum `gta_sa.exe` before creating the MO2 instance. This executable does
+not work reliably with USVFS injection, so the plugin resolves conflicts and
+copies the winning mod files into the game directory before starting the game
+without USVFS.
 
 - Plugin version: **2.0.3**
 - Installer version: **1.0.1**
 
 ## Features
 
-- Supports `gta_sa.exe` and `gta-sa.exe` installations.
+- Supports GTA San Andreas 1.0 US with the Hoodlum `gta_sa.exe`.
 - Installs common CLEO, ASI, and Modloader archive layouts.
 - Copies active mod files into the game directory before launch.
 - Resolves file conflicts using MO2 priority; the higher-priority mod wins.
@@ -27,13 +28,26 @@ before launch. The game itself is started without USVFS.
 ## Requirements
 
 - Mod Organizer 2 2.4 or newer with Python plugin support.
-- GTA San Andreas Classic for Windows (Steam, retail, or a downgraded install).
-- Modloader for mods that use the `modloader/` directory.
-- CLEO for CLEO scripts.
+- GTA San Andreas 1.0 US with the Hoodlum executable.
 
-Modloader and CLEO are only required when a mod depends on them.
+Steam and other store releases must be downgraded. The only game-side change
+required by this plugin is copying the 1.0 US Hoodlum `gta_sa.exe` into the game
+directory and replacing the original store executable.
 
-## Installation
+CLEO and Modloader are not plugin requirements. Install them through MO2 if one
+of your mods needs them; the plugin handles their root files and directory
+layouts like other managed mods.
+
+## Preparing the game
+
+1. Install GTA San Andreas from Steam or another store.
+2. Copy the 1.0 US Hoodlum `gta_sa.exe` into the game directory.
+3. Replace the original executable when prompted.
+
+No separate CLEO or Modloader installation is needed to start using the plugin.
+Both can be installed later through MO2.
+
+## Installing the plugin
 
 1. Download `gtasa_support-v2.0.3.zip` from the
    [latest release](https://github.com/pedrolecio/mo2-gtasa-support/releases/latest).
@@ -44,9 +58,9 @@ Modloader and CLEO are only required when a mod depends on them.
    ```
 
 3. Restart MO2.
-4. Create or select a GTA San Andreas instance.
+4. Create or select a GTA San Andreas instance using the prepared 1.0 US game.
 5. If the game is not detected automatically, select the directory containing
-   `gta_sa.exe` or `gta-sa.exe`.
+   the Hoodlum `gta_sa.exe`.
 
 The GTA San Andreas entry created by the plugin includes the `-nointro` argument.
 
@@ -164,6 +178,12 @@ update.
 Version 2.0.3 reads and upgrades manifests written by previous versions.
 
 ## Troubleshooting
+
+### The store version does not start
+
+The original Steam and other store executables are not supported. Confirm that
+the game directory contains the 1.0 US Hoodlum `gta_sa.exe` and that it replaced
+the original executable before creating or running the MO2 instance.
 
 ### MO2 still shows a USVFS proxy error
 
