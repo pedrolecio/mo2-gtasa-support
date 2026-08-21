@@ -23,7 +23,10 @@ def write_priorities(game_dir: str, organizer) -> None:
     try:
         _write_priorities_impl(game_dir, organizer)
     except Exception:
-        log.error(f"[GTASA] Erro ao sincronizar prioridades:\n{traceback.format_exc()}")
+        log.error(
+            f"[GTASA] Failed to synchronize Modloader priorities:\n"
+            f"{traceback.format_exc()}"
+        )
 
 
 def _write_priorities_impl(game_dir: str, organizer) -> None:
@@ -54,7 +57,6 @@ def _write_priorities_impl(game_dir: str, organizer) -> None:
                             entries_dict[item.name] = max(current_prio, priority)
 
     if not entries_dict:
-        log.info("[GTASA] Nenhum mod ativo com pastas de modloader encontrado; modloader.ini não modificado.")
         return
 
     # Monta as linhas de prioridade
@@ -134,9 +136,11 @@ def _write_priorities_impl(game_dir: str, organizer) -> None:
             if ini_path.exists():
                 os.remove(ini_path)
             os.rename(tmp_path, ini_path)
-            log.info(f"[GTASA] Prioridades escritas em: {ini_path}")
         except Exception:
-            log.error(f"[GTASA] Falha ao escrever {ini_path}:\n{traceback.format_exc()}")
+            log.error(
+                f"[GTASA] Failed to write Modloader priorities to {ini_path}:\n"
+                f"{traceback.format_exc()}"
+            )
             if tmp_path.exists():
                 try:
                     os.remove(tmp_path)

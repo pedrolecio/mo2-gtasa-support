@@ -6,7 +6,7 @@ Because Mod Organizer 2's native Virtual File System (VFS) has compatibility iss
 
 ## ✨ Core Features
 
-* **Physical Root Linking:** Automatically safely copies mod files into your game directory before launch and cleans them up after, keeping your base game pure while avoiding engine crashes.
+* **Physical Root Linking:** Safely copies mod files into your game directory before launch, starts GTA SA without USVFS injection, and restores originals when mods are disabled or the linker is cleared.
 * **Smart Mod Installation:** Recognizes mod file types and automatically organizes them into `cleo/`, `modloader/`, or the game's root folder without manual intervention.
 * **Modloader Priority Synchronization:** MO2's mod hierarchy conflict resolution rules seamlessly apply to Modloader, syncing your MO2 load order with `modloader.ini` on every launch.
 * **Automatic Backups:** Real game files that happen to be overwritten by root mods are safely backed up and restored once the mod is disabled.
@@ -37,8 +37,10 @@ To ensure MO2's "Load Order" is respected by the game, the plugin intercepts the
 ### 4. Physical Root Linker (`root_linker.py`)
 Since standard VFS hooking crashes the game engine, the plugin operates via a "RootBuilder" approach.
 - **On Game Launch:** The plugin gathers all active mods in their designated priority order. It then physically copies these files from your MO2 `mods/` directory straight into the actual GTA San Andreas game directory.
+- **Direct process launch:** After synchronization, the GTA executable is started outside the USVFS proxy and the hooked MO2 launch is cancelled. Other configured tools keep MO2's normal launch behavior.
 - **Backups:** If a mod file conflicts with a vanilla game file, the vanilla file is safely moved into a `.mo2_root_backups` folder.
-- **Tracking:** Every injected file is tracked in a local `.mo2_root_mod_files.json` registry.
+- **Tracking:** Every injected file and its winning source mod are tracked in a versioned `.mo2_root_mod_files.json` manifest. Existing list-based manifests are migrated automatically.
+- **Conflict updates:** A newly enabled or reprioritized mod always replaces the previous winner, even when both archive files have identical size and timestamps.
 - **On Change/Cleanup:** If you disable a mod, remove a file, or change your load order, the linker will read the tracker, delete the old mod files, clean up any left-over empty directories, and restore any original game backups automatically before launching again.
 
 ---

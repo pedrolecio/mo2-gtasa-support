@@ -1,19 +1,13 @@
 """
 plugin.py
 ---------
-GTASAGame: implementa IPluginGame + IPluginFileMapper para o GTA San Andreas clássico.
+GTASAGame: implementa IPluginGame para o GTA San Andreas clássico.
 
-Estratégia de VFS (Virtual File System):
-  - dataDirectory() retorna a raíz do JOGO, não a pasta modloader.
-    Isso diz ao MO2 que o "data root" de todos os mods é a raíz do jogo.
-  - mappings() percorre todos os mods ativos (ordem de prioridade) e cria
-    mapeamentos INDIVIDUAIS de arquivo (não de pasta) para a raíz do jogo.
-    Isso garante que o MO2 crie uma lista unificada de arquivos para cada
-    subpasta (como cleo/), permitindo que CLEO, Modloader e quaisquer outras
-    ferramentas vejam todos os arquivos de todos os mods simultaneamente.
-  - Mapeamentos da pasta Overwrite → raíz do jogo são adicionados com
-    create_target=True, permitindo que mods e ferramentas criem arquivos novos
-    (ex: modloader.log, saves) que serão redirecionados ao Overwrite do MO2.
+Estratégia de sincronização física:
+  - dataDirectory() retorna uma pasta vazia para evitar o VFS incompatível com
+    algumas versões 1.0/Hoodlum.
+  - Antes da execução, root_linker copia os arquivos vencedores de cada conflito
+    para a raiz do jogo e preserva os arquivos originais em backup.
 """
 
 from __future__ import annotations
@@ -25,7 +19,7 @@ import winreg
 from pathlib import Path
 
 import mobase
-from PyQt6.QtCore import QDir, QFileInfo, QStandardPaths
+from PyQt6.QtCore import QDir, QFileInfo, QProcess, QStandardPaths
 from PyQt6.QtGui import QIcon
 
 from . import modloader_ini
@@ -175,12 +169,12 @@ class GTASAGame(mobase.IPluginGame): # Removido IPluginFileMapper (usando modo f
 
     def description(self) -> str:
         return (
-            "Suporte ao GTA San Andreas (clássico) com VFS file-level, "
+            "Suporte ao GTA San Andreas (clássico) com sincronização física, "
             "suporte a Modloader, CLEO e arquivos de raíz."
         )
 
     def version(self) -> mobase.VersionInfo:
-        return mobase.VersionInfo(2, 0, 0, mobase.ReleaseType.final)
+        return mobase.VersionInfo(2, 0, 3, mobase.ReleaseType.final)
 
     def settings(self) -> list[mobase.PluginSetting]:
         return []
@@ -221,7 +215,7 @@ class GTASAGame(mobase.IPluginGame): # Removido IPluginFileMapper (usando modo f
         """
         Retorna uma pasta fantasma vazia. Única forma de evitar o crash de 
         inicialização com o crack Hoodlum/1.0 no MO2.
-        A emulação real para a raíz é feita via IPluginFileMapper.
+        A sincronização real para a raiz é feita pelo root_linker antes do jogo.
         """
         path = os.path.join(self.gameDirectory().absolutePath(), "GTA Root Folder")
         if not os.path.exists(path):
@@ -319,11 +313,35 @@ class GTASAGame(mobase.IPluginGame): # Removido IPluginFileMapper (usando modo f
             modloader_ini.write_priorities(gd, self._organizer)
             
             # 2. Sincroniza arquivos físicos na raíz (Modo RootBuilder)
-            log.info("[GTASA] Iniciando Root Sync (Modo Físico)...")
             root_linker.sync_mods(self._organizer, gd)
-            
+
+            # O linker físico existe justamente porque algumas versões do GTA SA
+            # não são compatíveis com a injeção do USVFS. onAboutToRun ocorre antes
+            # dessa injeção, então iniciamos apenas o executável do jogo diretamente
+            # e retornamos False para cancelar o lançamento duplicado pelo MO2.
+            executable_path = Path(executable)
+            if executable_path.name.casefold() in {MAIN_EXE, ALT_EXE}:
+                if not executable_path.is_file():
+                    log.error(f"[GTASA] Game executable not found: {executable_path}")
+                    return False
+
+                launch_result = QProcess.startDetached(
+                    str(executable_path), ["-nointro"], gd
+                )
+                started = (
+                    bool(launch_result[0])
+                    if isinstance(launch_result, tuple)
+                    else bool(launch_result)
+                )
+                if not started:
+                    log.error(
+                        f"[GTASA] Failed to launch without USVFS: {executable_path}"
+                    )
+                else:
+                    log.info(f"[GTASA] Game launched without USVFS: {executable_path}")
+                return False
+
             return True
         except Exception:
-            log.error(f"[GTASA] Falha no pre-run sync:\n{traceback.format_exc()}")
+            log.error(f"[GTASA] Pre-launch synchronization failed:\n{traceback.format_exc()}")
             return True # Permite o lançamento mesmo com o erro
-

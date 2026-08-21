@@ -90,7 +90,7 @@ class GTASAInstaller(mobase.IPluginInstallerSimple):
         )
 
     def version(self) -> mobase.VersionInfo:
-        return mobase.VersionInfo(1, 0, 0, mobase.ReleaseType.final)
+        return mobase.VersionInfo(1, 0, 1, mobase.ReleaseType.final)
 
     def isActive(self) -> bool:
         return self._organizer.managedGame().gameShortName() == "GTASA"
@@ -146,7 +146,7 @@ class GTASAInstaller(mobase.IPluginInstallerSimple):
                 return getattr(mobase.InstallResult, "MANUAL_REQUESTED", mobase.InstallResult.NOT_ATTEMPTED)
             # A árvore já foi modificada in-place ou substitída por _reorganize (o MO2 processa as mudanças em `tree`)
         except Exception as e:
-            log.error(f"[GTASA Installer] Erro ao reorganizar: {e}")
+            log.error(f"[GTASA Installer] Failed to reorganize archive: {e}")
             # Mesmo em caso de erro, cai para instalador manual/padrão
             return getattr(mobase.InstallResult, "MANUAL_REQUESTED", mobase.InstallResult.NOT_ATTEMPTED)
 
@@ -163,7 +163,9 @@ class GTASAInstaller(mobase.IPluginInstallerSimple):
 
         # ── Caso 1: Já tem estrutura conhecida (cleo/, modloader/, scripts/, …)
         if root_names & KNOWN_ROOT_FOLDERS:
-            log.info(f"[GTASA Installer] '{mod_name}': estrutura existente detectada → mantendo.")
+            log.info(
+                f"[GTASA Installer] '{mod_name}': keeping the existing directory layout."
+            )
             return tree
 
         # Coleta arquivos na raíz
@@ -172,30 +174,40 @@ class GTASAInstaller(mobase.IPluginInstallerSimple):
 
         # ── Caso 2: Contém scripts CLEO na raíz
         if root_file_exts & CLEO_EXTENSIONS:
-            log.info(f"[GTASA Installer] '{mod_name}': scripts CLEO detectados → movendo para cleo/")
+            log.info(
+                f"[GTASA Installer] '{mod_name}': moving root CLEO scripts to cleo/."
+            )
             return self._wrap_cleo_files(tree)
 
         # ── Caso 3: Contém arquivos típicos de raíz (.asi, .dll, etc.) na raíz
         if root_file_exts & ROOT_EXTENSIONS:
-            log.info(f"[GTASA Installer] '{mod_name}': arquivos de raíz detectados → instalando na raíz.")
+            log.info(
+                f"[GTASA Installer] '{mod_name}': using the game-root layout."
+            )
             return tree
 
         # ── Caso 4: Contém pastas de assets do Modloader
         root_folders_lower = {e.name().lower() for e in tree if e.isDir()}
         if root_folders_lower & MODLOADER_FOLDERS:
             log.info(
-                f"[GTASA Installer] '{mod_name}': assets de Modloader detectados "
-                f"→ embrulhando em modloader/{mod_name}/"
+                f"[GTASA Installer] '{mod_name}': wrapping assets in "
+                f"modloader/{mod_name}/."
             )
             return self._wrap_in_modloader(mod_name, tree)
 
         # ── Caso 5: Busca CLEO em subpastas
         if _has_extension(tree, CLEO_EXTENSIONS):
-            log.info(f"[GTASA Installer] '{mod_name}': scripts CLEO em subpastas/estrutura aninhada → requer instalação manual.")
+            log.info(
+                f"[GTASA Installer] '{mod_name}': nested CLEO layout requires "
+                "manual installation."
+            )
             return None
 
         # ── Fallback: requer instalação manual (arquivos soltos, dff, txd, etc)
-        log.info(f"[GTASA Installer] '{mod_name}': tipo não identificado (ex: dff/txd soltos) → requer instalação manual.")
+        log.info(
+            f"[GTASA Installer] '{mod_name}': unrecognized layout requires "
+            "manual installation."
+        )
         return None
 
     def _wrap_cleo_files(self, tree: mobase.IFileTree) -> mobase.IFileTree:
