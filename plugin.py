@@ -8,19 +8,23 @@ Estratégia de sincronização física:
     algumas versões 1.0/Hoodlum.
   - Antes da execução, root_linker copia os arquivos vencedores de cada conflito
     para a raiz do jogo e preserva os arquivos originais em backup.
+  - O jogo (e o SA-MP) é iniciado diretamente, sem injeção do USVFS.
 """
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
 import traceback
 import winreg
+from ctypes import wintypes
 from pathlib import Path
 
 import mobase
-from PyQt6.QtCore import QDir, QFileInfo, QProcess, QStandardPaths
+from PyQt6.QtCore import QDir, QFileInfo, QProcess
 from PyQt6.QtGui import QIcon
+from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from . import modloader_ini
 from . import root_linker
@@ -30,14 +34,16 @@ log = logging.getLogger("gtasa_support")
 GAME_NAME       = "GTA: San Andreas"
 MAIN_EXE        = "gta_sa.exe"   # Steam / versão original
 ALT_EXE         = "gta-sa.exe"   # Hoodlum e algumas versões crackeadas
+SAMP_EXE        = "samp.exe"
 STEAM_APPID     = "12120"
 
-# Tamanhos de arquivo do gta_sa.exe conhecidos da versão Hoodlum (bytes)
-# v1.0 US Hoodlum = 14.383.616  |  v1.0 EU Hoodlum = 14.246.912
-_HOODLUM_SIZES: set[int] = {14_383_616, 14_246_912}
+# Executáveis iniciados diretamente, sem USVFS, após a sincronização física.
+_DIRECT_LAUNCH  = {MAIN_EXE, ALT_EXE, SAMP_EXE}
+# Processos que mantêm arquivos do jogo abertos durante a execução.
+_GAME_PROCESSES = {MAIN_EXE, ALT_EXE}
 
-# Extensões CLEO que precisam de mapeamento especial (raíz → cleo/)
-_CLEO_EXTS = {".cs", ".csa", ".csi", ".fxt"}
+SETTING_IGNORE_UNMANAGED  = "ignore_unmanaged_modloader_folders"
+SETTING_PRESERVE_MODIFIED = "preserve_modified_files"
 
 # ── Detecção do jogo ────────────────────────────────────────────────────────
 
@@ -45,51 +51,26 @@ _CLEO_EXTS = {".cs", ".csa", ".csi", ".fxt"}
 def _detect_exe(game_dir: str) -> str:
     """
     Retorna o nome do executável principal encontrado na pasta do jogo.
-    Prioriza gta-sa.exe (Hoodlum/Downgraded) pois é o padrão para mods;
-    usa gta_sa.exe como fallback (Steam/Original).
+    Usa gta_sa.exe quando existe; gta-sa.exe (Hoodlum renomeado) como alternativa.
     """
-    for exe in (ALT_EXE, MAIN_EXE): # Prioridade Hoodlum
+    for exe in (MAIN_EXE, ALT_EXE):
         if os.path.isfile(os.path.join(game_dir, exe)):
             return exe
-    return MAIN_EXE  # default
+    return MAIN_EXE
 
 
-def _detect_hoodlum(game_dir: str) -> bool:
-    """
-    Verifica se a instalação usa o crack Hoodlum.
-    Indicadores checados (em ordem):
-      1. hoodlum.nfo presente na pasta do jogo
-      2. gta-sa.exe presente (exe renomeado pelo Hoodlum)
-      3. Tamanho do gta_sa.exe bate com tamanhos conhecidos do Hoodlum
-    """
-    # Indicador 1: arquivo .nfo do grupo
-    if os.path.isfile(os.path.join(game_dir, "hoodlum.nfo")):
-        return True
-    # Indicador 2: executável renomeado
-    if os.path.isfile(os.path.join(game_dir, ALT_EXE)):
-        return True
-    # Indicador 3: tamanho do exe bate
-    main_path = os.path.join(game_dir, MAIN_EXE)
-    if os.path.isfile(main_path):
-        size = os.path.getsize(main_path)
-        if size in _HOODLUM_SIZES:
-            return True
-    return False
+def _has_game_exe(directory: str) -> bool:
+    return (
+        os.path.isfile(os.path.join(directory, MAIN_EXE))
+        or os.path.isfile(os.path.join(directory, ALT_EXE))
+    )
 
 
 def _find_game() -> str:
     """
     Tenta localizar a instalação do GTA SA no registro do Steam ou em caminhos comuns.
-    Aceita tanto gta_sa.exe quanto gta-sa.exe (Hoodlum).
     Retorna a string do caminho se encontrado, ou "" caso contrário.
     """
-    def _valid(path: str) -> bool:
-        return (
-            os.path.isfile(os.path.join(path, MAIN_EXE))
-            or os.path.isfile(os.path.join(path, ALT_EXE))
-        )
-
-    # 1. Registro Steam
     for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
         for sub in (
             r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Steam App 12120",
@@ -98,12 +79,11 @@ def _find_game() -> str:
             try:
                 with winreg.OpenKey(hive, sub) as key:
                     path, _ = winreg.QueryValueEx(key, "InstallLocation")
-                    if path and _valid(path):
+                    if path and _has_game_exe(path):
                         return path
             except (FileNotFoundError, OSError):
                 pass
 
-    # 2. Caminhos comuns de instalação
     common_dirs = [
         r"C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto San Andreas",
         r"C:\Program Files\Steam\steamapps\common\Grand Theft Auto San Andreas",
@@ -113,10 +93,93 @@ def _find_game() -> str:
         r"E:\SteamLibrary\steamapps\common\Grand Theft Auto San Andreas",
     ]
     for d in common_dirs:
-        if _valid(d):
+        if _has_game_exe(d):
             return d
 
     return ""
+
+
+# ── Processos em execução ───────────────────────────────────────────────────
+
+
+class _PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", wintypes.WCHAR * 260),
+    ]
+
+
+def _running_process_names() -> set[str]:
+    """Nomes (casefold) dos executáveis em execução; vazio se a consulta falhar."""
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        entry_ptr = ctypes.POINTER(_PROCESSENTRY32W)
+        kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, entry_ptr]
+        kernel32.Process32NextW.argtypes = [wintypes.HANDLE, entry_ptr]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+        if not snapshot or snapshot == wintypes.HANDLE(-1).value:
+            return set()
+        names: set[str] = set()
+        try:
+            entry = _PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(entry)
+            ok = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+            while ok:
+                names.add(entry.szExeFile.casefold())
+                ok = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+        finally:
+            kernel32.CloseHandle(snapshot)
+        return names
+    except Exception:
+        log.warning(f"[GTASA] Could not list running processes:\n{traceback.format_exc()}")
+        return set()
+
+
+def _dialog_parent():
+    return QApplication.activeWindow()
+
+
+def _split_arguments(arguments: str) -> list[str]:
+    """
+    Divide a linha de argumentos do MO2 com as mesmas regras do Windows
+    (CommandLineToArgvW). O PyQt6 não expõe QProcess.splitCommand.
+    """
+    if not arguments or not arguments.strip():
+        return []
+    try:
+        shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        shell32.CommandLineToArgvW.argtypes = [
+            wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_int)
+        ]
+        shell32.CommandLineToArgvW.restype = ctypes.POINTER(wintypes.LPWSTR)
+        kernel32.LocalFree.argtypes = [wintypes.HLOCAL]
+        kernel32.LocalFree.restype = wintypes.HLOCAL
+
+        count = ctypes.c_int(0)
+        # O primeiro token segue regras de nome de programa; usamos um fictício.
+        argv = shell32.CommandLineToArgvW(f"x {arguments}", ctypes.byref(count))
+        if not argv:
+            raise OSError(ctypes.get_last_error(), "CommandLineToArgvW failed")
+        try:
+            return [argv[index] for index in range(1, count.value)]
+        finally:
+            kernel32.LocalFree(ctypes.cast(argv, wintypes.HLOCAL))
+    except Exception:
+        log.warning(f"[GTASA] Could not parse arguments {arguments!r}; splitting on spaces.")
+        return arguments.split()
 
 
 # ── Classe principal ─────────────────────────────────────────────────────────
@@ -134,7 +197,7 @@ class GTASAModDataChecker(mobase.ModDataChecker):
         return mobase.ModDataChecker.VALID
 
 
-class GTASAGame(mobase.IPluginGame): # Removido IPluginFileMapper (usando modo físico)
+class GTASAGame(mobase.IPluginGame):
     """
     Plugin de suporte ao GTA San Andreas para o Mod Organizer 2.
     Modo: Physical Linker (estilo RootBuilder)
@@ -156,7 +219,6 @@ class GTASAGame(mobase.IPluginGame): # Removido IPluginFileMapper (usando modo f
         return True
 
     def feature(self, feature_type):
-        """Retorna as funcionalidades customizadas do plugin."""
         if feature_type == mobase.ModDataChecker:
             return GTASAModDataChecker()
         return None
@@ -174,10 +236,34 @@ class GTASAGame(mobase.IPluginGame): # Removido IPluginFileMapper (usando modo f
         )
 
     def version(self) -> mobase.VersionInfo:
-        return mobase.VersionInfo(2, 0, 3, mobase.ReleaseType.final)
+        return mobase.VersionInfo(2, 1, 0, mobase.ReleaseType.final)
 
     def settings(self) -> list[mobase.PluginSetting]:
-        return []
+        return [
+            mobase.PluginSetting(
+                SETTING_IGNORE_UNMANAGED,
+                "Write priority 0 (ignore) for folders in the game's modloader/ "
+                "directory that no active MO2 mod provides.",
+                True,
+            ),
+            mobase.PluginSetting(
+                SETTING_PRESERVE_MODIFIED,
+                "Keep deployed files that the game or the user changed (for example "
+                "settings saved by a mod) until the mod itself changes the file.",
+                True,
+            ),
+        ]
+
+    def _setting(self, key: str, default: bool) -> bool:
+        try:
+            value = self._organizer.pluginSetting(self.name(), key)
+        except Exception:
+            return default
+        if value is None:
+            return default
+        if isinstance(value, str):
+            return value.strip().casefold() in {"true", "1", "yes"}
+        return bool(value)
 
     def isActive(self) -> bool:
         return True
@@ -213,18 +299,20 @@ class GTASAGame(mobase.IPluginGame): # Removido IPluginFileMapper (usando modo f
 
     def dataDirectory(self) -> QDir:
         """
-        Retorna uma pasta fantasma vazia. Única forma de evitar o crash de 
+        Retorna uma pasta fantasma vazia. Única forma de evitar o crash de
         inicialização com o crack Hoodlum/1.0 no MO2.
         A sincronização real para a raiz é feita pelo root_linker antes do jogo.
         """
         path = os.path.join(self.gameDirectory().absolutePath(), "GTA Root Folder")
         if not os.path.exists(path):
-            try: os.makedirs(path, exist_ok=True)
-            except: pass
+            try:
+                os.makedirs(path, exist_ok=True)
+            except OSError:
+                pass
         return QDir(path)
 
     def documentsDirectory(self) -> QDir:
-        # Desativado: Deixa o jogo usar o caminho padrão do sistema para evitar conflitos
+        # Desativado: deixa o jogo usar o caminho padrão do sistema.
         return QDir()
 
     def savesDirectory(self) -> QDir:
@@ -233,25 +321,24 @@ class GTASAGame(mobase.IPluginGame): # Removido IPluginFileMapper (usando modo f
     # ── IPluginGame: Executáveis ───────────────────────────────────────────────
 
     def binaryName(self) -> str:
-        return MAIN_EXE
+        return _detect_exe(self.gameDirectory().absolutePath())
 
     def executables(self) -> list:
         gd = self.gameDirectory().absolutePath()
         result = []
         exe_defs = [
-            (MAIN_EXE,   "GTA San Andreas"),
-            ("samp.exe", "SA-MP (San Andreas Multiplayer)"),
+            (MAIN_EXE, "GTA San Andreas"),
+            (ALT_EXE,  "GTA San Andreas (gta-sa.exe)"),
+            (SAMP_EXE, "SA-MP (San Andreas Multiplayer)"),
         ]
         for exe, label in exe_defs:
             full = os.path.join(gd, exe)
             if os.path.isfile(full):
-                result.append(
-                    mobase.ExecutableInfo(label, QFileInfo(full))
-                    .withWorkingDirectory(gd)
-                    .withArgument("-nointro")
-                )
+                info = mobase.ExecutableInfo(label, QFileInfo(full)).withWorkingDirectory(gd)
+                if exe != SAMP_EXE:
+                    info = info.withArgument("-nointro")
+                result.append(info)
 
-        # Fallback
         if not result:
             result.append(
                 mobase.ExecutableInfo(
@@ -266,22 +353,13 @@ class GTASAGame(mobase.IPluginGame): # Removido IPluginFileMapper (usando modo f
     # ── IPluginGame: Perfil e Validação ───────────────────────────────────────
 
     def initializeProfile(self, directory: QDir, settings: mobase.ProfileSetting) -> None:
-        p = Path(directory.absolutePath())
-        p.mkdir(parents=True, exist_ok=True)
+        Path(directory.absolutePath()).mkdir(parents=True, exist_ok=True)
 
     def isInstalled(self) -> bool:
-        gd = self.gameDirectory().absolutePath()
-        return (
-            os.path.isfile(os.path.join(gd, MAIN_EXE))
-            or os.path.isfile(os.path.join(gd, ALT_EXE))
-        )
+        return _has_game_exe(self.gameDirectory().absolutePath())
 
     def looksValid(self, directory: QDir) -> bool:
-        d = directory.absolutePath()
-        return (
-            os.path.isfile(os.path.join(d, MAIN_EXE))
-            or os.path.isfile(os.path.join(d, ALT_EXE))
-        )
+        return _has_game_exe(directory.absolutePath())
 
     def detectGame(self) -> None:
         found = _find_game()
@@ -293,7 +371,7 @@ class GTASAGame(mobase.IPluginGame): # Removido IPluginFileMapper (usando modo f
 
     # ── IPluginGame: Stubs (não usados para jogos não-Bethesda) ───────────────
 
-    def listSaves(self)   -> list: return []
+    def listSaves(self, folder: QDir) -> list: return []
     def iniFiles(self)    -> list: return []
     def DLCPlugins(self)  -> list: return []
     def sortMods(self)    -> bool: return False
@@ -301,47 +379,101 @@ class GTASAGame(mobase.IPluginGame): # Removido IPluginFileMapper (usando modo f
 
     # ── Hook: antes de executar o jogo ────────────────────────────────────────
 
-    def _on_about_to_run(self, executable: str) -> bool:
+    def _on_about_to_run(self, executable: str, working_dir: QDir, arguments: str) -> bool:
         """
-        Sincroniza prioridades no modloader.ini e realiza a cópia física
-        dos mods (estilo RootBuilder) antes de iniciar o jogo.
+        Sincroniza os arquivos físicos e as prioridades do Modloader antes de
+        qualquer executável. O jogo e o SA-MP são iniciados diretamente (sem
+        USVFS) com os argumentos e a pasta configurados no MO2.
         """
+        executable_path = Path(executable)
+        direct_launch = executable_path.name.casefold() in _DIRECT_LAUNCH
+        gd = self.gameDirectory().absolutePath()
+
+        running = _running_process_names() & _GAME_PROCESSES
+        if running:
+            QMessageBox.warning(
+                _dialog_parent(),
+                "GTA San Andreas",
+                "O GTA San Andreas ainda está em execução "
+                f"({', '.join(sorted(running))}).\n\n"
+                "Feche o jogo (verifique o Gerenciador de Tarefas) antes de iniciar "
+                "de novo; com ele aberto os arquivos dos mods ficam travados e a "
+                "sincronização sai incompleta.",
+            )
+            log.warning(f"[GTASA] Launch cancelled: game already running ({running}).")
+            return False
+
         try:
-            gd = self.gameDirectory().absolutePath()
-            
-            # 1. Sincroniza prioridades do Modloader
-            modloader_ini.write_priorities(gd, self._organizer)
-            
-            # 2. Sincroniza arquivos físicos na raíz (Modo RootBuilder)
-            root_linker.sync_mods(self._organizer, gd)
+            sync = root_linker.sync_mods(
+                self._organizer,
+                gd,
+                preserve_modified=self._setting(SETTING_PRESERVE_MODIFIED, True),
+            )
+            # Depois da sincronização, para enxergar o estado final de modloader/.
+            modloader_ini.write_priorities(
+                gd,
+                self._organizer,
+                ignore_unmanaged=self._setting(SETTING_IGNORE_UNMANAGED, True),
+            )
+        except Exception:
+            details = traceback.format_exc()
+            log.error(f"[GTASA] Pre-launch synchronization failed:\n{details}")
+            QMessageBox.critical(
+                _dialog_parent(),
+                "GTA San Andreas",
+                "A sincronização dos mods falhou e a execução foi cancelada.\n\n"
+                f"{details.strip().splitlines()[-1]}\n\n"
+                "Veja os detalhes em logs/mo_interface.log.",
+            )
+            # Iniciar com USVFS não serve de alternativa: o jogo não funciona com
+            # a injeção e os mods não chegariam à pasta real.
+            return False
 
-            # O linker físico existe justamente porque algumas versões do GTA SA
-            # não são compatíveis com a injeção do USVFS. onAboutToRun ocorre antes
-            # dessa injeção, então iniciamos apenas o executável do jogo diretamente
-            # e retornamos False para cancelar o lançamento duplicado pelo MO2.
-            executable_path = Path(executable)
-            if executable_path.name.casefold() in {MAIN_EXE, ALT_EXE}:
-                if not executable_path.is_file():
-                    log.error(f"[GTASA] Game executable not found: {executable_path}")
-                    return False
-
-                launch_result = QProcess.startDetached(
-                    str(executable_path), ["-nointro"], gd
-                )
-                started = (
-                    bool(launch_result[0])
-                    if isinstance(launch_result, tuple)
-                    else bool(launch_result)
-                )
-                if not started:
-                    log.error(
-                        f"[GTASA] Failed to launch without USVFS: {executable_path}"
-                    )
-                else:
-                    log.info(f"[GTASA] Game launched without USVFS: {executable_path}")
+        if sync.errors:
+            shown = "\n".join(f"• {message}" for message in sync.errors[:8])
+            more = f"\n… e mais {len(sync.errors) - 8}." if len(sync.errors) > 8 else ""
+            answer = QMessageBox.question(
+                _dialog_parent(),
+                "GTA San Andreas",
+                f"{len(sync.errors)} problema(s) durante a sincronização dos mods; "
+                f"alguns arquivos podem não estar atualizados:\n\n{shown}{more}\n\n"
+                "Iniciar mesmo assim?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
                 return False
 
+        if not direct_launch:
             return True
-        except Exception:
-            log.error(f"[GTASA] Pre-launch synchronization failed:\n{traceback.format_exc()}")
-            return True # Permite o lançamento mesmo com o erro
+
+        # onAboutToRun ocorre antes da injeção do USVFS; iniciamos o executável
+        # diretamente e retornamos False para cancelar o lançamento pelo MO2.
+        if not executable_path.is_file():
+            log.error(f"[GTASA] Executable not found: {executable_path}")
+            return False
+
+        work_dir = working_dir.absolutePath() if working_dir is not None else ""
+        if not work_dir or not os.path.isdir(work_dir):
+            work_dir = gd
+        argument_list = _split_arguments(arguments)
+
+        launch_result = QProcess.startDetached(
+            str(executable_path), argument_list, work_dir
+        )
+        started = (
+            bool(launch_result[0]) if isinstance(launch_result, tuple) else bool(launch_result)
+        )
+        if not started:
+            log.error(f"[GTASA] Failed to launch without USVFS: {executable_path}")
+            QMessageBox.critical(
+                _dialog_parent(),
+                "GTA San Andreas",
+                f"Não foi possível iniciar {executable_path.name}.",
+            )
+        else:
+            log.info(
+                f"[GTASA] Game launched without USVFS: {executable_path} "
+                f"{' '.join(argument_list)}".rstrip()
+            )
+        return False

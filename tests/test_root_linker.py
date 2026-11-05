@@ -138,6 +138,166 @@ class RootLinkerTests(unittest.TestCase):
         self.assertEqual(original.read_text(encoding="utf-8"), "original")
         self.assertFalse((self.game / root_linker.TRACKING_FILE).exists())
 
+    def test_untracked_modloader_file_is_orphaned_and_never_restored(self):
+        relative = "modloader/Weapons/ak47.txd"
+        stale = self.game / relative
+        stale.parent.mkdir(parents=True)
+        stale.write_bytes(b"OLD BUILD")
+
+        mod_root = self._make_mod("weapons", relative, b"NEW BUILD")
+        mod_list = FakeModList({"weapons": mod_root}, {"weapons": 1})
+        organizer = FakeOrganizer(mod_list)
+
+        result = root_linker.sync_mods(organizer, str(self.game))
+        self.assertEqual(stale.read_bytes(), b"NEW BUILD")
+        self.assertEqual(result.orphaned, [str(Path(relative))])
+        self.assertFalse((self.game / root_linker.BACKUP_DIR / relative).exists())
+        self.assertEqual(
+            (self.game / root_linker.ORPHAN_DIR / relative).read_bytes(), b"OLD BUILD"
+        )
+
+        # Desativar o mod remove o arquivo; a versao antiga nao volta.
+        mod_list.active.clear()
+        root_linker.sync_mods(organizer, str(self.game))
+        self.assertFalse(stale.exists())
+
+    def test_identical_untracked_modloader_file_is_adopted_without_orphan(self):
+        relative = "modloader/Weapons/ak47.txd"
+        stale = self.game / relative
+        stale.parent.mkdir(parents=True)
+        stale.write_bytes(b"SAME")
+        mod_root = self._make_mod("weapons", relative, b"SAME")
+        organizer = FakeOrganizer(FakeModList({"weapons": mod_root}, {"weapons": 1}))
+
+        result = root_linker.sync_mods(organizer, str(self.game))
+        self.assertEqual(result.orphaned, [])
+        self.assertFalse((self.game / root_linker.ORPHAN_DIR).exists())
+
+    def test_legacy_modloader_backups_are_moved_to_orphans(self):
+        relative = "modloader/Weapons/ak47.txd"
+        backup = self.game / root_linker.BACKUP_DIR / relative
+        backup.parent.mkdir(parents=True)
+        backup.write_bytes(b"OLD BUILD")
+        vanilla_backup = self.game / root_linker.BACKUP_DIR / "data/gta.dat"
+        vanilla_backup.parent.mkdir(parents=True)
+        vanilla_backup.write_bytes(b"VANILLA")
+
+        organizer = FakeOrganizer(FakeModList({}, {}))
+        root_linker.sync_mods(organizer, str(self.game))
+
+        self.assertFalse(backup.exists())
+        self.assertFalse((self.game / root_linker.BACKUP_DIR / "modloader").exists())
+        self.assertTrue(vanilla_backup.exists())
+        self.assertEqual(
+            (self.game / root_linker.ORPHAN_DIR / relative).read_bytes(), b"OLD BUILD"
+        )
+
+    def test_file_modified_by_game_is_preserved_until_source_changes(self):
+        relative = "modloader/SkyGfx/skygfx.ini"
+        mod_root = self._make_mod("skygfx", relative, b"default")
+        organizer = FakeOrganizer(FakeModList({"skygfx": mod_root}, {"skygfx": 1}))
+        destination = self.game / relative
+
+        root_linker.sync_mods(organizer, str(self.game))
+        destination.write_bytes(b"user settings")
+        os.utime(destination, ns=(2_000_000_000_000_000_000, 2_000_000_000_000_000_000))
+
+        result = root_linker.sync_mods(organizer, str(self.game))
+        self.assertEqual(destination.read_bytes(), b"user settings")
+        self.assertEqual(result.preserved, [str(Path(relative))])
+        self.assertEqual(result.copied, 0)
+
+        # Proxima execucao: ja nao conta como "preservado" de novo.
+        result = root_linker.sync_mods(organizer, str(self.game))
+        self.assertEqual(result.preserved, [])
+
+        # Uma nova versao do mod substitui o arquivo.
+        (mod_root / relative).write_bytes(b"new default")
+        root_linker.sync_mods(organizer, str(self.game))
+        self.assertEqual(destination.read_bytes(), b"new default")
+
+    def test_modified_file_is_overwritten_when_preservation_is_disabled(self):
+        relative = "config.ini"
+        mod_root = self._make_mod("cfg", relative, b"default")
+        organizer = FakeOrganizer(FakeModList({"cfg": mod_root}, {"cfg": 1}))
+        destination = self.game / relative
+
+        root_linker.sync_mods(organizer, str(self.game))
+        destination.write_bytes(b"changed!")
+        root_linker.sync_mods(organizer, str(self.game), preserve_modified=False)
+        self.assertEqual(destination.read_bytes(), b"default")
+
+    def test_version_2_manifest_preserves_modified_destination(self):
+        relative = "config.ini"
+        mod_root = self._make_mod("cfg", relative, b"default")
+        source_stat = (mod_root / relative).stat()
+        destination = self.game / relative
+        destination.write_bytes(b"changed by game")
+        manifest = {
+            "version": 2,
+            "files": {
+                relative: {
+                    "path": relative,
+                    "source": root_linker._source_id(mod_root / relative),
+                    "source_mod": "cfg",
+                    "size": source_stat.st_size,
+                    "mtime_ns": source_stat.st_mtime_ns,
+                }
+            },
+        }
+        (self.game / root_linker.TRACKING_FILE).write_text(json.dumps(manifest))
+        organizer = FakeOrganizer(FakeModList({"cfg": mod_root}, {"cfg": 1}))
+
+        root_linker.sync_mods(organizer, str(self.game))
+        self.assertEqual(destination.read_bytes(), b"changed by game")
+        saved = json.loads((self.game / root_linker.TRACKING_FILE).read_text())
+        self.assertEqual(saved["version"], root_linker.MANIFEST_VERSION)
+        self.assertIn("dest_size", saved["files"][relative])
+
+    def test_mo2_metadata_hidden_and_protected_files_are_skipped(self):
+        mod_root = self._make_mod("mod", "meta.ini", b"[General]")
+        self._make_mod("mod", "fomod/ModuleConfig.xml", b"<config/>")
+        self._make_mod("mod", "cleo/old.cs.mohidden", b"hidden")
+        self._make_mod("mod", "modloader/modloader.ini", b"[Folder.Config]")
+        self._make_mod("mod", "modloader/Mod/meta.ini", b"kept: not at mod root")
+        organizer = FakeOrganizer(FakeModList({"mod": mod_root}, {"mod": 1}))
+
+        root_linker.sync_mods(organizer, str(self.game))
+
+        self.assertFalse((self.game / "meta.ini").exists())
+        self.assertFalse((self.game / "fomod").exists())
+        self.assertFalse((self.game / "cleo/old.cs.mohidden").exists())
+        self.assertFalse((self.game / "modloader/modloader.ini").exists())
+        self.assertTrue((self.game / "modloader/Mod/meta.ini").exists())
+
+    def test_empty_directories_are_deployed_and_removed(self):
+        mod_root = self._make_mod("cleo", "cleo/script.cs", b"script")
+        (mod_root / "cleo/cleo_saves").mkdir()
+        mod_list = FakeModList({"cleo": mod_root}, {"cleo": 1})
+        organizer = FakeOrganizer(mod_list)
+
+        root_linker.sync_mods(organizer, str(self.game))
+        self.assertTrue((self.game / "cleo/cleo_saves").is_dir())
+
+        mod_list.active.clear()
+        root_linker.sync_mods(organizer, str(self.game))
+        self.assertFalse((self.game / "cleo").exists())
+
+    def test_files_of_unreadable_mod_are_kept(self):
+        relative = "plugin.asi"
+        mod_root = self._make_mod("plugin", relative, b"asi")
+        mod_list = FakeModList({"plugin": mod_root}, {"plugin": 1})
+        organizer = FakeOrganizer(mod_list)
+        root_linker.sync_mods(organizer, str(self.game))
+
+        # A pasta do mod some temporariamente (ex.: sendo reinstalada).
+        mod_root.rename(self.root / "plugin-moved")
+        result = root_linker.sync_mods(organizer, str(self.game))
+        self.assertTrue((self.game / relative).exists())
+        self.assertTrue(result.errors)
+        manifest = json.loads((self.game / root_linker.TRACKING_FILE).read_text())
+        self.assertIn(relative, manifest["files"])
+
 
 if __name__ == "__main__":
     unittest.main()

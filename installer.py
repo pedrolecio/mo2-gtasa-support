@@ -5,11 +5,13 @@ IPluginInstallerSimple para GTA San Andreas.
 
 Detecta automaticamente o tipo de mod e organiza os arquivos durante a instalação:
 
-  1. Mods CLEO (.cs, .csa, .csi, .fxt) → subpasta "cleo/"
-  2. Mods com pasta "cleo/" ou "modloader/" existente → mantém a estrutura
-  3. Mods com arquivos de raíz (.asi, .dll, .img, .ini na raíz) → instalados na raíz
-  4. Mods com assets do jogo (models/, audio/, etc.) → wrapeados em "modloader/<nome>/"
-  5. Qualquer outra coisa → instalado como está (usuário confirma)
+  0. Uma única pasta "embrulhando" o conteúdo (ex.: "MeuMod v1/...") é aberta
+  1. Mods com pasta "cleo/", "modloader/", ... existente → mantém a estrutura
+  2. Mods CLEO (.cs, .csa, .csi, .fxt) na raíz → subpasta "cleo/"
+  3. Mods com arquivos de raíz (.asi, .dll, .img, .dat ...) → instalados na raíz
+  4. Mods com pastas de assets (models/, audio/, etc.) ou modelos soltos
+     (.dff, .txd, .col, .ifp, .ide, .ipl) → embrulhados em "modloader/<nome>/"
+  5. Qualquer outra coisa → instalador manual do MO2
 """
 
 from __future__ import annotations
@@ -36,6 +38,51 @@ MODLOADER_FOLDERS = {
 
 # Pastas de raíz que indicam uma instalação mista já estruturada
 KNOWN_ROOT_FOLDERS = {"cleo", "modloader", "scripts", "moonloader"}
+
+# Arquivos soltos que o Modloader carrega diretamente de modloader/<mod>/
+MODLOADER_FILE_EXTENSIONS = {".dff", ".txd", ".col", ".ifp", ".ide", ".ipl"}
+
+# Arquivos que costumam acompanhar uma pasta "embrulho" sem fazer parte do mod
+DOCUMENT_EXTENSIONS = {
+    ".txt", ".md", ".pdf", ".url", ".htm", ".html", ".nfo", ".png", ".jpg", ".jpeg",
+}
+
+_INVALID_NAME_CHARS = set('<>:"/\\|?*')
+
+
+def _safe_folder_name(name: str) -> str:
+    """Remove caracteres inválidos em nomes de pasta do Windows."""
+    cleaned = "".join("_" if ch in _INVALID_NAME_CHARS or ord(ch) < 32 else ch for ch in name)
+    cleaned = cleaned.strip().rstrip(". ")
+    return cleaned or "Mod"
+
+
+def _unwrap_single_folder(tree: mobase.IFileTree) -> bool:
+    """
+    Se o arquivo contém apenas uma pasta (mais, no máximo, documentação) e essa
+    pasta não é uma estrutura reconhecida, move o conteúdo dela para a raíz.
+    """
+    dirs = [e for e in tree if e.isDir()]
+    files = [e for e in tree if e.isFile()]
+    if len(dirs) != 1:
+        return False
+    if any(Path(f.name()).suffix.lower() not in DOCUMENT_EXTENSIONS for f in files):
+        return False
+
+    wrapper = dirs[0]
+    name = wrapper.name().lower()
+    if name in KNOWN_ROOT_FOLDERS or name in MODLOADER_FOLDERS:
+        return False
+    child_names = {child.name().lower() for child in wrapper}
+    if not child_names or name in child_names:
+        return False
+    # Não sobrescreve a documentação da raíz com a da pasta.
+    if child_names & {f.name().lower() for f in files}:
+        return False
+
+    tree.merge(wrapper)
+    wrapper.detach()
+    return True
 
 
 def _collect_entries(tree: mobase.IFileTree) -> list[mobase.FileTreeEntry]:
@@ -90,7 +137,7 @@ class GTASAInstaller(mobase.IPluginInstallerSimple):
         )
 
     def version(self) -> mobase.VersionInfo:
-        return mobase.VersionInfo(1, 0, 1, mobase.ReleaseType.final)
+        return mobase.VersionInfo(1, 1, 0, mobase.ReleaseType.final)
 
     def isActive(self) -> bool:
         return self._organizer.managedGame().gameShortName() == "GTASA"
@@ -159,6 +206,12 @@ class GTASAInstaller(mobase.IPluginInstallerSimple):
         Aplica a reorganização correta dependendo do tipo de mod detectado.
         Retorna a árvore (possivelmente modificada).
         """
+        # ── Caso 0: abre pastas que só embrulham o conteúdo (pode haver várias)
+        for _ in range(4):
+            if not _unwrap_single_folder(tree):
+                break
+            log.info(f"[GTASA Installer] '{mod_name}': unwrapped a top-level folder.")
+
         root_names = _root_names_lower(tree)
 
         # ── Caso 1: Já tem estrutura conhecida (cleo/, modloader/, scripts/, …)
@@ -188,7 +241,7 @@ class GTASAInstaller(mobase.IPluginInstallerSimple):
 
         # ── Caso 4: Contém pastas de assets do Modloader
         root_folders_lower = {e.name().lower() for e in tree if e.isDir()}
-        if root_folders_lower & MODLOADER_FOLDERS:
+        if root_folders_lower & MODLOADER_FOLDERS or root_file_exts & MODLOADER_FILE_EXTENSIONS:
             log.info(
                 f"[GTASA Installer] '{mod_name}': wrapping assets in "
                 f"modloader/{mod_name}/."
@@ -203,7 +256,7 @@ class GTASAInstaller(mobase.IPluginInstallerSimple):
             )
             return None
 
-        # ── Fallback: requer instalação manual (arquivos soltos, dff, txd, etc)
+        # ── Fallback: requer instalação manual
         log.info(
             f"[GTASA Installer] '{mod_name}': unrecognized layout requires "
             "manual installation."
@@ -234,7 +287,7 @@ class GTASAInstaller(mobase.IPluginInstallerSimple):
         Embrulha todo o conteúdo da árvore dentro de 'modloader/<mod_name>/'.
         """
         # Cria "modloader/mod_name/" e move tudo para lá
-        destination = f"modloader/{mod_name}/"
+        destination = f"modloader/{_safe_folder_name(mod_name)}/"
         for entry in list(tree):
             tree.move(entry, destination)
         return tree
