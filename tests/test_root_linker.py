@@ -192,42 +192,56 @@ class RootLinkerTests(unittest.TestCase):
             (self.game / root_linker.ORPHAN_DIR / relative).read_bytes(), b"OLD BUILD"
         )
 
-    def test_file_modified_by_game_is_preserved_until_source_changes(self):
-        relative = "modloader/SkyGfx/skygfx.ini"
-        mod_root = self._make_mod("skygfx", relative, b"default")
-        organizer = FakeOrganizer(FakeModList({"skygfx": mod_root}, {"skygfx": 1}))
+    def test_file_modified_by_game_is_restored_from_mo2_and_kept_in_orphans(self):
+        relative = "modloader/Weapons/Tec9/tec9.weaponinfo"
+        mod_root = self._make_mod("weapons", relative, b"id=32\n")
+        organizer = FakeOrganizer(FakeModList({"weapons": mod_root}, {"weapons": 1}))
         destination = self.game / relative
 
         root_linker.sync_mods(organizer, str(self.game))
-        destination.write_bytes(b"user settings")
+        # Um editor in-game regrava o arquivo implantado.
+        destination.write_bytes(b"id=32\nhandik.version=4\n")
         os.utime(destination, ns=(2_000_000_000_000_000_000, 2_000_000_000_000_000_000))
 
         result = root_linker.sync_mods(organizer, str(self.game))
-        self.assertEqual(destination.read_bytes(), b"user settings")
-        self.assertEqual(result.preserved, [str(Path(relative))])
-        self.assertEqual(result.copied, 0)
+        self.assertEqual(destination.read_bytes(), b"id=32\n")
+        self.assertEqual(result.restored, [str(Path(relative))])
+        self.assertEqual(
+            (self.game / root_linker.ORPHAN_DIR / relative).read_bytes(),
+            b"id=32\nhandik.version=4\n",
+        )
 
-        # Proxima execucao: ja nao conta como "preservado" de novo.
+        # Sem novas alteracoes nada e copiado de novo.
         result = root_linker.sync_mods(organizer, str(self.game))
-        self.assertEqual(result.preserved, [])
+        self.assertEqual((result.copied, result.restored), (0, []))
 
-        # Uma nova versao do mod substitui o arquivo.
-        (mod_root / relative).write_bytes(b"new default")
-        root_linker.sync_mods(organizer, str(self.game))
-        self.assertEqual(destination.read_bytes(), b"new default")
-
-    def test_modified_file_is_overwritten_when_preservation_is_disabled(self):
+    def test_edit_in_mo2_wins_even_if_game_changed_the_copy(self):
         relative = "config.ini"
         mod_root = self._make_mod("cfg", relative, b"default")
         organizer = FakeOrganizer(FakeModList({"cfg": mod_root}, {"cfg": 1}))
         destination = self.game / relative
 
         root_linker.sync_mods(organizer, str(self.game))
-        destination.write_bytes(b"changed!")
-        root_linker.sync_mods(organizer, str(self.game), preserve_modified=False)
-        self.assertEqual(destination.read_bytes(), b"default")
+        destination.write_bytes(b"changed by game")
+        (mod_root / relative).write_bytes(b"edited in MO2")
 
-    def test_version_2_manifest_preserves_modified_destination(self):
+        result = root_linker.sync_mods(organizer, str(self.game))
+        self.assertEqual(destination.read_bytes(), b"edited in MO2")
+        self.assertEqual(result.restored, [relative])
+
+    def test_unchanged_game_copy_is_not_saved_to_orphans(self):
+        relative = "config.ini"
+        mod_root = self._make_mod("cfg", relative, b"default")
+        organizer = FakeOrganizer(FakeModList({"cfg": mod_root}, {"cfg": 1}))
+
+        root_linker.sync_mods(organizer, str(self.game))
+        (mod_root / relative).write_bytes(b"new version")
+        result = root_linker.sync_mods(organizer, str(self.game))
+        self.assertEqual((self.game / relative).read_bytes(), b"new version")
+        self.assertEqual(result.restored, [])
+        self.assertFalse((self.game / root_linker.ORPHAN_DIR).exists())
+
+    def test_version_2_manifest_restores_modified_destination(self):
         relative = "config.ini"
         mod_root = self._make_mod("cfg", relative, b"default")
         source_stat = (mod_root / relative).stat()
@@ -249,10 +263,44 @@ class RootLinkerTests(unittest.TestCase):
         organizer = FakeOrganizer(FakeModList({"cfg": mod_root}, {"cfg": 1}))
 
         root_linker.sync_mods(organizer, str(self.game))
-        self.assertEqual(destination.read_bytes(), b"changed by game")
+        self.assertEqual(destination.read_bytes(), b"default")
+        self.assertEqual(
+            (self.game / root_linker.ORPHAN_DIR / relative).read_bytes(), b"changed by game"
+        )
         saved = json.loads((self.game / root_linker.TRACKING_FILE).read_text())
         self.assertEqual(saved["version"], root_linker.MANIFEST_VERSION)
         self.assertIn("dest_size", saved["files"][relative])
+
+    def test_copy_kept_by_version_2_1_0_is_restored(self):
+        # 2.1.0 recorded the game-modified file as the expected destination.
+        relative = "modloader/Weapons/tec9.weaponinfo"
+        mod_root = self._make_mod("weapons", relative, b"id=32\n")
+        source_stat = (mod_root / relative).stat()
+        destination = self.game / relative
+        destination.parent.mkdir(parents=True)
+        destination.write_bytes(b"id=32\nhandik.version=4\n")
+        destination_stat = destination.stat()
+        manifest = {
+            "version": 3,
+            "files": {
+                relative.casefold(): {
+                    "path": relative,
+                    "source": root_linker._source_id(mod_root / relative),
+                    "source_mod": "weapons",
+                    "size": source_stat.st_size,
+                    "mtime_ns": source_stat.st_mtime_ns,
+                    "dest_size": destination_stat.st_size,
+                    "dest_mtime_ns": destination_stat.st_mtime_ns,
+                }
+            },
+            "dirs": {},
+        }
+        (self.game / root_linker.TRACKING_FILE).write_text(json.dumps(manifest))
+        organizer = FakeOrganizer(FakeModList({"weapons": mod_root}, {"weapons": 1}))
+
+        result = root_linker.sync_mods(organizer, str(self.game))
+        self.assertEqual(destination.read_bytes(), b"id=32\n")
+        self.assertEqual(result.restored, [str(Path(relative))])
 
     def test_mo2_metadata_hidden_and_protected_files_are_skipped(self):
         mod_root = self._make_mod("mod", "meta.ini", b"[General]")

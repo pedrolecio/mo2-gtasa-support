@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.1.1] - 2026-11-06
+
+### Changed
+
+- MO2 is always the source of truth again: deployed files changed by the game,
+  a mod or an in-game editor are restored from MO2 on every launch. The changed
+  copies are saved to `.mo2_root_orphans/` before being replaced.
+- Plugin version updated to `2.1.1`.
+
+### Removed
+
+- The `preserve_modified_files` setting. Keeping game-side changes made `.ini`,
+  text and `.weaponinfo` files in the game directory diverge from MO2.
+
 ## [2.1.0] - 2026-11-05
 
 ### Added
@@ -80,5 +94,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   by mod contents.
 - Relative paths are validated before files are copied, removed, or restored.
 
+[2.1.1]: https://github.com/pedrolecio/mo2-gtasa-support/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/pedrolecio/mo2-gtasa-support/compare/v2.0.3...v2.1.0
 [2.0.3]: https://github.com/pedrolecio/mo2-gtasa-support/compare/1.1...v2.0.3

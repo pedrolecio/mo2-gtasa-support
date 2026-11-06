@@ -9,7 +9,7 @@ not work reliably with USVFS injection, so the plugin resolves conflicts and
 copies the winning mod files into the game directory before starting the game
 without USVFS.
 
-- Plugin version: **2.1.0**
+- Plugin version: **2.1.1**
 - Installer version: **1.1.0**
 
 ## Features
@@ -24,8 +24,8 @@ without USVFS.
 - Synchronizes MO2 priorities with the Modloader priority section.
 - Never treats files inside `modloader/` as original game files, so old mod
   versions are never "restored" when a mod is disabled or updated.
-- Keeps settings that the game or a mod saves into deployed files (for example
-  `.ini` files) instead of overwriting them on every launch.
+- MO2 is always the source of truth: files changed in the game directory are
+  restored from MO2 on every launch, and the changed copies are kept aside.
 - Gives priority 0 (ignored) to `modloader/` folders that no active mod provides.
 - Skips MO2 metadata (`meta.ini`, `fomod/`) and hidden `*.mohidden` files.
 - Starts GTA San Andreas and SA-MP directly, without USVFS injection, using the
@@ -58,7 +58,7 @@ Both can be installed later through MO2.
 
 ## Installing the plugin
 
-1. Download `gtasa_support-v2.1.0.zip` from the
+1. Download `gtasa_support-v2.1.1.zip` from the
    [latest release](https://github.com/pedrolecio/mo2-gtasa-support/releases/latest).
 2. Extract the `gtasa_support` directory into the MO2 plugin directory:
 
@@ -167,10 +167,12 @@ unless both files are identical. Orphans are never restored automatically; you
 can delete that folder once you have checked its contents. Backups of
 `modloader/` files made by older versions are moved there automatically.
 
-If the game or a mod changes a deployed file (settings saved to an `.ini`, a
-`.json`, a log), the change is kept until the mod itself ships a new version of
-that file. Delete the file from the game directory to get the mod's version
-back on the next launch, or turn off `preserve_modified_files`.
+MO2 always wins. If the game, a mod or an in-game editor changes a deployed
+file (settings saved to an `.ini` or `.json`, a `.weaponinfo` saved by an
+editor, a log), the next launch restores the version from MO2. The changed copy
+is first saved to `.mo2_root_orphans/` under the same relative path, so you can
+copy anything you want to keep into the mod in MO2. To make a change permanent,
+edit the file in the mod's folder in MO2.
 
 Empty directories shipped by mods (such as `cleo/cleo_saves/`) are created and
 removed together with the mod. If a mod directory cannot be read during a sync,
@@ -209,7 +211,6 @@ Available under *Settings > Plugins > GTA San Andreas Support Plugin*:
 | Setting | Default | Effect |
 | --- | --- | --- |
 | `ignore_unmanaged_modloader_folders` | `true` | Priority 0 for `modloader/` folders no active mod provides. |
-| `preserve_modified_files` | `true` | Keep deployed files changed by the game or user until the mod changes them. |
 
 ## Files created in the game directory
 
@@ -232,7 +233,7 @@ Replace the existing `gtasa_support` plugin directory with the new release, then
 restart MO2. Do not remove the tracking manifest or backup directory during an
 update.
 
-Version 2.1.0 reads and upgrades manifests written by previous versions.
+Version 2.1.1 reads and upgrades manifests written by previous versions.
 
 ## Troubleshooting
 

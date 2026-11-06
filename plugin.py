@@ -43,7 +43,6 @@ _DIRECT_LAUNCH  = {MAIN_EXE, ALT_EXE, SAMP_EXE}
 _GAME_PROCESSES = {MAIN_EXE, ALT_EXE}
 
 SETTING_IGNORE_UNMANAGED  = "ignore_unmanaged_modloader_folders"
-SETTING_PRESERVE_MODIFIED = "preserve_modified_files"
 
 # ── Detecção do jogo ────────────────────────────────────────────────────────
 
@@ -236,7 +235,7 @@ class GTASAGame(mobase.IPluginGame):
         )
 
     def version(self) -> mobase.VersionInfo:
-        return mobase.VersionInfo(2, 1, 0, mobase.ReleaseType.final)
+        return mobase.VersionInfo(2, 1, 1, mobase.ReleaseType.final)
 
     def settings(self) -> list[mobase.PluginSetting]:
         return [
@@ -244,12 +243,6 @@ class GTASAGame(mobase.IPluginGame):
                 SETTING_IGNORE_UNMANAGED,
                 "Write priority 0 (ignore) for folders in the game's modloader/ "
                 "directory that no active MO2 mod provides.",
-                True,
-            ),
-            mobase.PluginSetting(
-                SETTING_PRESERVE_MODIFIED,
-                "Keep deployed files that the game or the user changed (for example "
-                "settings saved by a mod) until the mod itself changes the file.",
                 True,
             ),
         ]
@@ -404,11 +397,7 @@ class GTASAGame(mobase.IPluginGame):
             return False
 
         try:
-            sync = root_linker.sync_mods(
-                self._organizer,
-                gd,
-                preserve_modified=self._setting(SETTING_PRESERVE_MODIFIED, True),
-            )
+            sync = root_linker.sync_mods(self._organizer, gd)
             # Depois da sincronização, para enxergar o estado final de modloader/.
             modloader_ini.write_priorities(
                 gd,

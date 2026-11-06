@@ -6,7 +6,8 @@ cada conflito e o estado do destino logo apos a copia. Isso permite:
 
   - trocar o arquivo quando o mod vencedor muda, mesmo com tamanho/data iguais;
   - perceber quando o jogo (ou o usuario) alterou um arquivo implantado, como um
-    .ini de configuracao, e preservar essa alteracao em vez de sobrescreve-la;
+    .ini de configuracao, e restaurar a versao do MO2 (que sempre vence),
+    guardando a versao alterada em .mo2_root_orphans/;
   - nunca tratar conteudo de modloader/ como arquivo original do jogo.
 """
 
@@ -53,7 +54,7 @@ _NON_ORIGINAL_ROOTS = {"modloader"}
 class SyncResult:
     copied: int = 0
     removed: int = 0
-    preserved: list[str] = field(default_factory=list)
+    restored: list[str] = field(default_factory=list)
     orphaned: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -406,14 +407,38 @@ def _take_over_untracked(
         shutil.copy2(destination, backup)
 
 
+def _keep_game_copy(
+    source: Path,
+    destination: Path,
+    relative: Path,
+    orphan_path: Path,
+    result: SyncResult,
+) -> None:
+    """
+    O jogo ou o usuario alterou um arquivo implantado (ex.: um .ini regravado
+    por um mod ou um .weaponinfo salvo por um editor in-game). A versao do MO2
+    vai substitui-lo; a versao alterada e guardada na pasta de orfaos.
+    """
+    try:
+        identical = filecmp.cmp(destination, source, shallow=False)
+    except OSError:
+        identical = False
+    if identical:
+        return
+    saved = orphan_path / relative
+    saved.parent.mkdir(parents=True, exist_ok=True)
+    if saved.exists():
+        _remove_file(saved)
+    shutil.copy2(destination, saved)
+    result.restored.append(str(relative))
+
+
 def _summary(paths: list[str], limit: int = 10) -> str:
     text = ", ".join(paths[:limit])
     return text + (" ..." if len(paths) > limit else "")
 
 
-def sync_mods(
-    organizer: Any, game_dir: str, preserve_modified: bool = True
-) -> SyncResult:
+def sync_mods(organizer: Any, game_dir: str) -> SyncResult:
     """Sincroniza os mods ativos com a pasta do jogo."""
     game_path = Path(game_dir)
     tracking_path = game_path / TRACKING_FILE
@@ -496,29 +521,29 @@ def sync_mods(
                 and previous.get("mtime_ns") == source_stat.st_mtime_ns
             )
 
-            should_copy = True
-            if source_unchanged and destination_stat is not None:
-                if "dest_size" in previous:
-                    expected = (previous.get("dest_size"), previous.get("dest_mtime_ns"))
-                else:
-                    # Manifesto antigo: o esperado e o proprio arquivo de origem.
-                    expected = (source_stat.st_size, source_stat.st_mtime_ns)
+            # Uma copia intacta tem o mesmo tamanho e data da origem que foi
+            # implantada (copy2 preserva a data). Compara com essa origem, e nao
+            # com dest_size/dest_mtime_ns: a versao 2.1.0 gravava ali o estado de
+            # arquivos alterados pelo jogo, que assim pareciam intactos.
+            deployed_as_recorded = False
+            if previous is not None and destination_stat is not None:
+                deployed_as_recorded = _same_stat(
+                    destination_stat.st_size,
+                    destination_stat.st_mtime_ns,
+                    previous.get("size"),
+                    previous.get("mtime_ns"),
+                )
 
-                if _same_stat(
-                    destination_stat.st_size, destination_stat.st_mtime_ns, *expected
-                ):
-                    should_copy = False
-                elif preserve_modified:
-                    # O jogo ou o usuario alterou o arquivo (ex.: um .ini salvo
-                    # pelo mod). A alteracao vale ate o mod mudar a origem.
-                    should_copy = False
-                    result.preserved.append(str(relative))
-
-            if should_copy:
-                if previous is None and destination_stat is not None:
-                    _take_over_untracked(
-                        source, destination, relative, backup_path, orphan_path, result
-                    )
+            # O MO2 e sempre a fonte da verdade: copia quando a origem mudou ou
+            # quando o jogo/usuario alterou a copia implantada.
+            if not (source_unchanged and deployed_as_recorded):
+                if destination_stat is not None:
+                    if previous is None:
+                        _take_over_untracked(
+                            source, destination, relative, backup_path, orphan_path, result
+                        )
+                    elif not deployed_as_recorded:
+                        _keep_game_copy(source, destination, relative, orphan_path, result)
                 _replace_file(source, destination)
                 result.copied += 1
                 destination_stat = destination.stat()
@@ -557,10 +582,11 @@ def sync_mods(
         log.error(f"[GTASA Linker] {message}")
         result.errors.append(message)
 
-    if result.preserved:
-        log.info(
-            f"[GTASA Linker] Kept {len(result.preserved)} file(s) modified by the "
-            f"game or user: {_summary(result.preserved)}"
+    if result.restored:
+        log.warning(
+            f"[GTASA Linker] Restored {len(result.restored)} file(s) changed in the game "
+            f"folder from MO2; the changed copies were saved in {ORPHAN_DIR}/: "
+            f"{_summary(result.restored)}"
         )
     if result.orphaned:
         log.warning(
